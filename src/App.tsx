@@ -37,12 +37,13 @@ import {
 } from "./lib/format";
 import { MockPriceProvider } from "./providers/prices";
 import { applyTransactionToHolding, buildSeedTransactions, buildTransactionRecord, type TransactionDraft } from "./lib/portfolioTransactions";
-import { loadHoldings, loadTransactions, saveHoldings, saveTransactions } from "./lib/storage";
-import type { DividendEvent, Holding, HoldingRow, PriceSnapshot, Transaction } from "./types";
+import { loadAssets, loadHoldings, loadSnapshots, loadTransactions, saveAssets, saveHoldings, saveSnapshots, saveTransactions } from "./lib/storage";
+import type { Asset, DividendEvent, Holding, HoldingRow, PriceSnapshot, Transaction } from "./types";
 
 type TabKey = "home" | "portfolio" | "performance" | "dividends";
 type SortKey = "returnRate" | "weightDiff" | "drawdownFrom52w";
 type EditField = "quantity" | "avg_buy_price" | "target_weight" | "memo";
+type AssetFormField = "name" | "ticker" | "market" | "account_name" | "quantity" | "avg_buy_price" | "target_weight" | "current_price" | "high_52w" | "memo";
 
 const tabs: { key: TabKey; label: string }[] = [
   { key: "home", label: "홈" },
@@ -68,26 +69,42 @@ const initialTransactionDraft = (holding?: Holding): TransactionDraft => ({
   note: ""
 });
 
+const initialAssetForm = {
+  name: "",
+  ticker: "",
+  market: "ETF",
+  account_name: "ISA",
+  quantity: "1",
+  avg_buy_price: "0",
+  target_weight: "10",
+  current_price: "0",
+  high_52w: "0",
+  memo: ""
+};
+
 function App() {
   const [activeTab, setActiveTab] = useState<TabKey>("home");
   const [sortKey, setSortKey] = useState<SortKey>("drawdownFrom52w");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [editableAssets, setEditableAssets] = useState(() => loadAssets(assets));
   const [editableHoldings, setEditableHoldings] = useState<Holding[]>(() => loadHoldings(initialHoldings));
-  const [priceSnapshots, setPriceSnapshots] = useState<PriceSnapshot[]>([]);
+  const [priceSnapshots, setPriceSnapshots] = useState<PriceSnapshot[]>(() => loadSnapshots(priceHistory));
   const [selectedHoldingId, setSelectedHoldingId] = useState<string>(initialHoldings[0]?.id ?? "");
   const [transactionLog, setTransactionLog] = useState<Transaction[]>(() => loadTransactions(initialHoldings));
   const [transactionForm, setTransactionForm] = useState<TransactionDraft>(() =>
     initialTransactionDraft(initialHoldings[0])
   );
   const [transactionError, setTransactionError] = useState<string | null>(null);
+  const [assetForm, setAssetForm] = useState(initialAssetForm);
+  const [assetFormError, setAssetFormError] = useState<string | null>(null);
 
   useEffect(() => {
     void refreshPrices(true);
   }, []);
 
-  const rows = useMemo(() => buildHoldingRows(assets, editableHoldings, priceSnapshots), [editableHoldings, priceSnapshots]);
+  const rows = useMemo(() => buildHoldingRows(editableAssets, editableHoldings, priceSnapshots), [editableAssets, editableHoldings, priceSnapshots]);
   const sortedRows = useMemo(() => {
     return [...rows].sort((a, b) => {
       const direction = sortKey === "drawdownFrom52w" ? 1 : -1;
@@ -143,7 +160,12 @@ function App() {
 
     try {
       const snapshots = await provider.getLatestSnapshots();
-      setPriceSnapshots(snapshots);
+      setPriceSnapshots((current) => {
+        const currentOnly = current.filter(
+          (snapshot) => !snapshots.some((fresh) => fresh.assetId === snapshot.assetId)
+        );
+        return [...snapshots, ...currentOnly];
+      });
       setError(null);
     } catch {
       setError("현재가를 불러오지 못했습니다. mock provider 연결 상태를 확인해주세요.");
@@ -190,6 +212,82 @@ function App() {
       fee: 0,
       note: ""
     }));
+  }
+
+  function submitNewAsset() {
+    const quantity = Number(assetForm.quantity);
+    const avgBuyPrice = Number(assetForm.avg_buy_price);
+    const targetWeight = Number(assetForm.target_weight);
+    const currentPrice = Number(assetForm.current_price);
+    const high52w = Number(assetForm.high_52w);
+
+    if (!assetForm.name || !assetForm.ticker) {
+      setAssetFormError("종목명과 티커는 필수입니다.");
+      return;
+    }
+
+    if ([quantity, avgBuyPrice, targetWeight, currentPrice, high52w].some((value) => Number.isNaN(value) || value < 0)) {
+      setAssetFormError("숫자 입력값을 다시 확인해주세요.");
+      return;
+    }
+
+    const timestamp = new Date().toISOString();
+    const assetId = `asset-${Date.now()}`;
+    const holdingId = `holding-${Date.now()}`;
+
+    const nextAsset: Asset = {
+      id: assetId,
+      name: assetForm.name,
+      ticker: assetForm.ticker,
+      market: assetForm.market as HoldingRow["market"],
+      asset_type: assetForm.market === "KRX" ? "stock" : "etf",
+      currency: "KRW" as const,
+      benchmark_group: "custom",
+      dividend_cycle: "none" as const,
+      is_active: true,
+      created_at: timestamp,
+      updated_at: timestamp
+    };
+
+    const nextHolding = {
+      id: holdingId,
+      asset_id: assetId,
+      account_name: assetForm.account_name,
+      quantity,
+      avg_buy_price: avgBuyPrice,
+      buy_date: timestamp.slice(0, 10),
+      target_weight: targetWeight / 100,
+      memo: assetForm.memo,
+      created_at: timestamp,
+      updated_at: timestamp
+    };
+
+    const nextSnapshot = {
+      assetId,
+      currentPrice,
+      high52w,
+      asOf: timestamp.slice(0, 10),
+      source: "manual" as const
+    };
+
+    const seedTransaction = buildTransactionRecord(nextHolding, {
+      asset_id: assetId,
+      account_name: assetForm.account_name,
+      type: "buy",
+      quantity,
+      price: avgBuyPrice,
+      fee: 0,
+      date: timestamp.slice(0, 10),
+      note: "초기 입력"
+    });
+
+    setEditableAssets((current) => [...current, nextAsset]);
+    setEditableHoldings((current) => [...current, nextHolding]);
+    setPriceSnapshots((current) => [...current, nextSnapshot]);
+    setTransactionLog((current) => [seedTransaction, ...current]);
+    setSelectedHoldingId(holdingId);
+    setAssetForm(initialAssetForm);
+    setAssetFormError(null);
   }
 
   return (
@@ -260,7 +358,7 @@ function App() {
                 </section>
 
                 <section className="panel"><div className="panel-head"><h2>비중 구성</h2></div><div className="chart-wrap"><ResponsiveContainer width="100%" height={260}><PieChart><Pie data={pieData} dataKey="value" nameKey="name" innerRadius={58} outerRadius={92} paddingAngle={2} /><Tooltip formatter={(value: number) => formatCurrency(value)} /></PieChart></ResponsiveContainer></div></section>
-                <section className="panel"><div className="panel-head"><h2>다가오는 배당</h2><span className="helper-text">예정 순</span></div><div className="list-block">{upcomingDividends.map((event) => { const asset = assets.find((item) => item.id === event.asset_id); return <div key={event.id} className="list-row"><div><strong>{asset?.name}</strong><p>{formatDateLabel(event.payment_due_date)} 지급 예정</p></div><span>{formatCurrency(event.expected_amount)}</span></div>; })}</div></section>
+                <section className="panel"><div className="panel-head"><h2>다가오는 배당</h2><span className="helper-text">예정 순</span></div><div className="list-block">{upcomingDividends.map((event) => { const asset = editableAssets.find((item) => item.id === event.asset_id); return <div key={event.id} className="list-row"><div><strong>{asset?.name}</strong><p>{formatDateLabel(event.payment_due_date)} 지급 예정</p></div><span>{formatCurrency(event.expected_amount)}</span></div>; })}</div></section>
                 <section className="panel"><div className="panel-head"><h2>간단 성과 요약</h2></div><div className="metric-stack"><div><span>최근 1년 갭</span><strong className={performanceSummary.trailing1Y >= 0 ? "positive" : "negative"}>{formatPercent(performanceSummary.trailing1Y)}</strong></div><div><span>최근 3년 누적 갭</span><strong className={performanceSummary.trailing3Y >= 0 ? "positive" : "negative"}>{formatPercent(performanceSummary.trailing3Y)}</strong></div></div></section>
               </div>
             </section>
@@ -276,9 +374,34 @@ function App() {
 
               <aside className="panel editor-panel">
                 <div className="panel-head"><h2>수동 입력 편집</h2><span className="helper-text">로컬 상태 기준</span></div>
+                <section className="transaction-panel new-asset-panel">
+                  <div className="panel-head"><h3>새 종목 추가</h3><span className="helper-text">CSV 없이 직접 등록</span></div>
+                  {assetFormError ? <p className="error-text">{assetFormError}</p> : null}
+                  <div className="field-grid">
+                    <label className="field-block"><span>종목명</span><input type="text" value={assetForm.name} onChange={(event) => setAssetForm((current) => ({ ...current, name: event.target.value }))} /></label>
+                    <label className="field-block"><span>티커</span><input type="text" value={assetForm.ticker} onChange={(event) => setAssetForm((current) => ({ ...current, ticker: event.target.value }))} /></label>
+                  </div>
+                  <div className="field-grid">
+                    <label className="field-block"><span>시장</span><select value={assetForm.market} onChange={(event) => setAssetForm((current) => ({ ...current, market: event.target.value }))}><option value="ETF">ETF</option><option value="KRX">KRX</option><option value="NASDAQ">NASDAQ</option><option value="NYSE">NYSE</option></select></label>
+                    <label className="field-block"><span>계좌</span><input type="text" value={assetForm.account_name} onChange={(event) => setAssetForm((current) => ({ ...current, account_name: event.target.value }))} /></label>
+                  </div>
+                  <div className="field-grid">
+                    <label className="field-block"><span>초기 수량</span><input type="number" min="0" value={assetForm.quantity} onChange={(event) => setAssetForm((current) => ({ ...current, quantity: event.target.value }))} /></label>
+                    <label className="field-block"><span>평균단가</span><input type="number" min="0" value={assetForm.avg_buy_price} onChange={(event) => setAssetForm((current) => ({ ...current, avg_buy_price: event.target.value }))} /></label>
+                  </div>
+                  <div className="field-grid">
+                    <label className="field-block"><span>현재가</span><input type="number" min="0" value={assetForm.current_price} onChange={(event) => setAssetForm((current) => ({ ...current, current_price: event.target.value }))} /></label>
+                    <label className="field-block"><span>52주 고가</span><input type="number" min="0" value={assetForm.high_52w} onChange={(event) => setAssetForm((current) => ({ ...current, high_52w: event.target.value }))} /></label>
+                  </div>
+                  <div className="field-grid">
+                    <label className="field-block"><span>목표 비중 (%)</span><input type="number" min="0" step="0.1" value={assetForm.target_weight} onChange={(event) => setAssetForm((current) => ({ ...current, target_weight: event.target.value }))} /></label>
+                    <label className="field-block"><span>메모</span><input type="text" value={assetForm.memo} onChange={(event) => setAssetForm((current) => ({ ...current, memo: event.target.value }))} /></label>
+                  </div>
+                  <button className="primary-btn transaction-btn" onClick={submitNewAsset}>종목 추가</button>
+                </section>
                 {selectedHolding && selectedRow ? (
                   <><div className="editor-summary"><strong>{selectedRow.name}</strong><p>{selectedRow.ticker} · {selectedHolding.account_name}</p><span className={`badge ${selectedRow.mddStage}`}>{getMddLabel(selectedRow.mddStage)}</span></div>
-                  <label className="field-block"><span>편집 종목</span><select value={selectedHolding.id} onChange={(event) => setSelectedHoldingId(event.target.value)}>{editableHoldings.map((holding) => { const asset = assets.find((item) => item.id === holding.asset_id); return <option key={holding.id} value={holding.id}>{asset?.name ?? holding.id}</option>; })}</select></label>
+                  <label className="field-block"><span>편집 종목</span><select value={selectedHolding.id} onChange={(event) => setSelectedHoldingId(event.target.value)}>{editableHoldings.map((holding) => { const asset = editableAssets.find((item) => item.id === holding.asset_id); return <option key={holding.id} value={holding.id}>{asset?.name ?? holding.id}</option>; })}</select></label>
                   <div className="field-grid"><label className="field-block"><span>보유 수량</span><input type="number" value={selectedHolding.quantity} onChange={(event) => updateHoldingField(selectedHolding.id, "quantity", event.target.value)} /></label><label className="field-block"><span>매입 단가</span><input type="number" value={selectedHolding.avg_buy_price} onChange={(event) => updateHoldingField(selectedHolding.id, "avg_buy_price", event.target.value)} /></label></div>
                   <label className="field-block"><span>목표 비중 (%)</span><input type="number" step="0.1" value={(selectedHolding.target_weight * 100).toFixed(1)} onChange={(event) => updateHoldingField(selectedHolding.id, "target_weight", event.target.value)} /></label>
                   <label className="field-block"><span>메모</span><textarea rows={4} value={selectedHolding.memo} onChange={(event) => updateHoldingField(selectedHolding.id, "memo", event.target.value)} /></label>
@@ -347,6 +470,13 @@ function DividendColumn({ title, items }: { title: string; items: DividendEvent[
 }
 
 export default App;
+
+
+
+
+
+
+
 
 
 

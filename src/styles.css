@@ -198,3 +198,11 @@ tbody tr { cursor: pointer; }
   color: #6b7680;
   font-size: 0.86rem;
 }
+
+.new-asset-panel {
+  margin-bottom: 18px;
+}
+
+.new-asset-panel .field-grid {
+  margin-bottom: 0;
+}
