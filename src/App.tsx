@@ -35,14 +35,36 @@ import {
   formatPercent,
   formatPercentPlain
 } from "./lib/format";
+import {
+  buildTransactionRecord,
+  recalculateHoldingFromTransactions,
+  type TransactionDraft
+} from "./lib/portfolioTransactions";
+import {
+  loadAssets,
+  loadHoldings,
+  loadSnapshots,
+  loadTransactions,
+  saveAssets,
+  saveHoldings,
+  saveSnapshots,
+  saveTransactions
+} from "./lib/storage";
 import { MockPriceProvider } from "./providers/prices";
-import { applyTransactionToHolding, buildSeedTransactions, buildTransactionRecord, type TransactionDraft } from "./lib/portfolioTransactions";
-import { loadAssets, loadHoldings, loadSnapshots, loadTransactions, saveAssets, saveHoldings, saveSnapshots, saveTransactions } from "./lib/storage";
-import type { Asset, DividendEvent, Holding, HoldingRow, PriceSnapshot, Transaction } from "./types";
+import type {
+  Asset,
+  DividendEvent,
+  Holding,
+  HoldingRow,
+  PriceSnapshot,
+  Transaction
+} from "./types";
 
 type TabKey = "home" | "portfolio" | "performance" | "dividends";
 type SortKey = "returnRate" | "weightDiff" | "drawdownFrom52w";
-type EditField = "quantity" | "avg_buy_price" | "target_weight" | "memo";
+type HoldingEditField = "account_name" | "quantity" | "avg_buy_price" | "target_weight" | "memo";
+type AssetEditField = "name" | "ticker" | "market";
+type SnapshotEditField = "currentPrice" | "high52w";
 type AssetFormField = "name" | "ticker" | "market" | "account_name" | "quantity" | "avg_buy_price" | "target_weight" | "current_price" | "high_52w" | "memo";
 
 const tabs: { key: TabKey; label: string }[] = [
@@ -59,8 +81,8 @@ const sortLabels: Record<SortKey, string> = {
 };
 
 const initialTransactionDraft = (holding?: Holding): TransactionDraft => ({
-  asset_id: holding?.asset_id ?? initialHoldings[0].asset_id,
-  account_name: holding?.account_name ?? initialHoldings[0].account_name,
+  asset_id: holding?.asset_id ?? initialHoldings[0]?.asset_id ?? "",
+  account_name: holding?.account_name ?? initialHoldings[0]?.account_name ?? "ISA",
   type: "buy",
   quantity: 1,
   price: holding?.avg_buy_price ?? 0,
@@ -69,7 +91,7 @@ const initialTransactionDraft = (holding?: Holding): TransactionDraft => ({
   note: ""
 });
 
-const initialAssetForm = {
+const initialAssetForm: Record<AssetFormField, string> = {
   name: "",
   ticker: "",
   market: "ETF",
@@ -80,6 +102,39 @@ const initialAssetForm = {
   current_price: "0",
   high_52w: "0",
   memo: ""
+};
+
+const sortTransactionsDesc = (transactions: Transaction[]) =>
+  [...transactions].sort((a, b) => {
+    if (a.date !== b.date) return b.date.localeCompare(a.date);
+    return b.created_at.localeCompare(a.created_at);
+  });
+
+const isTransactionInvalid = (transactions: Transaction[]) => {
+  let quantity = 0;
+  const sorted = [...transactions].sort((a, b) => {
+    if (a.date !== b.date) return a.date.localeCompare(b.date);
+    return a.created_at.localeCompare(b.created_at);
+  });
+
+  for (const transaction of sorted) {
+    if (transaction.quantity <= 0 || transaction.price <= 0 || transaction.fee < 0) {
+      return "수량과 가격은 0보다 커야 하고 수수료는 0 이상이어야 합니다.";
+    }
+
+    if (transaction.type === "buy") {
+      quantity += transaction.quantity;
+      continue;
+    }
+
+    if (transaction.quantity > quantity) {
+      return "거래 순서를 기준으로 보면 매도 수량이 보유 수량보다 많습니다.";
+    }
+
+    quantity -= transaction.quantity;
+  }
+
+  return null;
 };
 
 function App() {
@@ -93,9 +148,8 @@ function App() {
   const [priceSnapshots, setPriceSnapshots] = useState<PriceSnapshot[]>(() => loadSnapshots(priceHistory));
   const [selectedHoldingId, setSelectedHoldingId] = useState<string>(initialHoldings[0]?.id ?? "");
   const [transactionLog, setTransactionLog] = useState<Transaction[]>(() => loadTransactions(initialHoldings));
-  const [transactionForm, setTransactionForm] = useState<TransactionDraft>(() =>
-    initialTransactionDraft(initialHoldings[0])
-  );
+  const [transactionForm, setTransactionForm] = useState<TransactionDraft>(() => initialTransactionDraft(initialHoldings[0]));
+  const [editingTransactionId, setEditingTransactionId] = useState<string | null>(null);
   const [transactionError, setTransactionError] = useState<string | null>(null);
   const [assetForm, setAssetForm] = useState(initialAssetForm);
   const [assetFormError, setAssetFormError] = useState<string | null>(null);
@@ -105,40 +159,47 @@ function App() {
   }, []);
 
   const rows = useMemo(() => buildHoldingRows(editableAssets, editableHoldings, priceSnapshots), [editableAssets, editableHoldings, priceSnapshots]);
-  const sortedRows = useMemo(() => {
-    return [...rows].sort((a, b) => {
-      const direction = sortKey === "drawdownFrom52w" ? 1 : -1;
-      return (a[sortKey] - b[sortKey]) * direction;
-    });
-  }, [rows, sortKey]);
+  const sortedRows = useMemo(() => [...rows].sort((a, b) => {
+    const direction = sortKey === "drawdownFrom52w" ? 1 : -1;
+    return (a[sortKey] - b[sortKey]) * direction;
+  }), [rows, sortKey]);
 
   const selectedHolding = editableHoldings.find((holding) => holding.id === selectedHoldingId) ?? editableHoldings[0];
+  const selectedAsset = selectedHolding ? editableAssets.find((asset) => asset.id === selectedHolding.asset_id) : undefined;
+  const selectedSnapshot = selectedHolding ? priceSnapshots.find((snapshot) => snapshot.assetId === selectedHolding.asset_id) : undefined;
   const selectedRow = rows.find((row) => row.holdingId === selectedHolding?.id) ?? rows[0];
+  const selectedTransactions = useMemo(() => {
+    if (!selectedHolding) return [];
+    return sortTransactionsDesc(transactionLog.filter((transaction) => transaction.asset_id === selectedHolding.asset_id && transaction.account_name === selectedHolding.account_name));
+  }, [selectedHolding, transactionLog]);
 
   useEffect(() => {
-    if (!selectedHolding) return;
-    setTransactionForm((current) => ({
-      ...current,
-      asset_id: selectedHolding.asset_id,
-      account_name: selectedHolding.account_name,
-      price: current.price || selectedHolding.avg_buy_price,
-      type: current.type
-    }));
-  }, [selectedHolding]);
+    if (editableHoldings.length === 0) {
+      setSelectedHoldingId("");
+      return;
+    }
+
+    if (!editableHoldings.some((holding) => holding.id === selectedHoldingId)) {
+      setSelectedHoldingId(editableHoldings[0].id);
+    }
+  }, [editableHoldings, selectedHoldingId]);
 
   useEffect(() => {
-    saveHoldings(editableHoldings);
-  }, [editableHoldings]);
+    setEditingTransactionId(null);
+    setTransactionError(null);
+    setTransactionForm(initialTransactionDraft(selectedHolding));
+  }, [selectedHoldingId]);
 
-  useEffect(() => {
-    saveTransactions(transactionLog);
-  }, [transactionLog]);
+  useEffect(() => saveAssets(editableAssets), [editableAssets]);
+  useEffect(() => saveHoldings(editableHoldings), [editableHoldings]);
+  useEffect(() => saveSnapshots(priceSnapshots), [priceSnapshots]);
+  useEffect(() => saveTransactions(transactionLog), [transactionLog]);
 
   const portfolioSummary = useMemo(() => summarizePortfolio(rows), [rows]);
   const performance = useMemo(() => evaluatePerformanceRecords(performanceRecords, benchmarkSettings.warningYears), []);
   const performanceSummary = useMemo(() => getPerformanceSummary(performance), [performance]);
   const dividends = useMemo(() => enrichDividendAmounts(dividendEvents, editableHoldings), [editableHoldings]);
-  const dividendSummary = useMemo(() => groupDividends(dividends, assets), [dividends]);
+  const dividendSummary = useMemo(() => groupDividends(dividends, editableAssets), [dividends, editableAssets]);
   const upcomingDividends = useMemo(() => getUpcomingDividends(dividends).slice(0, 3), [dividends]);
 
   const pieData = rows.map((row) => ({ name: row.ticker, value: row.marketValue }));
@@ -161,9 +222,7 @@ function App() {
     try {
       const snapshots = await provider.getLatestSnapshots();
       setPriceSnapshots((current) => {
-        const currentOnly = current.filter(
-          (snapshot) => !snapshots.some((fresh) => fresh.assetId === snapshot.assetId)
-        );
+        const currentOnly = current.filter((snapshot) => !snapshots.some((fresh) => fresh.assetId === snapshot.assetId));
         return [...snapshots, ...currentOnly];
       });
       setError(null);
@@ -174,44 +233,112 @@ function App() {
       else setRefreshing(false);
     }
   }
+  function updateHoldingField(holdingId: string, field: HoldingEditField, value: string) {
+    const holding = editableHoldings.find((item) => item.id === holdingId);
+    if (!holding) return;
 
-  function updateHoldingField(holdingId: string, field: EditField, value: string) {
-    setEditableHoldings((current) =>
-      current.map((holding) => {
-        if (holding.id !== holdingId) return holding;
-        if (field === "memo") return { ...holding, memo: value };
-        const parsed = Number(value);
-        if (Number.isNaN(parsed)) return holding;
-        return { ...holding, [field]: field === "target_weight" ? parsed / 100 : parsed };
-      })
-    );
+    if (field === "account_name") {
+      const nextAccountName = value;
+      setEditableHoldings((current) => current.map((item) => item.id === holdingId ? { ...item, account_name: nextAccountName, updated_at: new Date().toISOString() } : item));
+      setTransactionLog((current) => current.map((transaction) => transaction.asset_id === holding.asset_id && transaction.account_name === holding.account_name ? { ...transaction, account_name: nextAccountName } : transaction));
+      return;
+    }
+
+    if (field === "memo") {
+      setEditableHoldings((current) => current.map((item) => item.id === holdingId ? { ...item, memo: value, updated_at: new Date().toISOString() } : item));
+      return;
+    }
+
+    const parsed = Number(value);
+    if (Number.isNaN(parsed)) return;
+
+    setEditableHoldings((current) => current.map((item) => {
+      if (item.id !== holdingId) return item;
+      return { ...item, [field]: field === "target_weight" ? parsed / 100 : parsed, updated_at: new Date().toISOString() };
+    }));
+  }
+
+  function updateAssetField(assetId: string, field: AssetEditField, value: string) {
+    setEditableAssets((current) => current.map((asset) => asset.id === assetId ? { ...asset, [field]: value, updated_at: new Date().toISOString() } : asset));
+  }
+
+  function updateSnapshotField(assetId: string, field: SnapshotEditField, value: string) {
+    const parsed = Number(value);
+    if (Number.isNaN(parsed)) return;
+
+    setPriceSnapshots((current) => current.map((snapshot) => snapshot.assetId === assetId ? { ...snapshot, [field]: parsed, asOf: new Date().toISOString().slice(0, 10), source: "manual" } : snapshot));
   }
 
   function submitTransaction() {
     if (!selectedHolding) return;
 
-    if (transactionForm.quantity <= 0 || transactionForm.price <= 0) {
-      setTransactionError("수량과 가격은 0보다 커야 합니다.");
+    const existingTransaction = transactionLog.find((transaction) => transaction.id === editingTransactionId);
+    const draftRecord = buildTransactionRecord(selectedHolding, transactionForm, editingTransactionId ?? undefined);
+    const nextTransaction: Transaction = {
+      ...draftRecord,
+      created_at: existingTransaction?.created_at ?? new Date().toISOString()
+    };
+
+    const nextHoldingTransactions = editingTransactionId
+      ? selectedTransactions.map((transaction) => transaction.id === editingTransactionId ? nextTransaction : transaction)
+      : [...selectedTransactions, nextTransaction];
+
+    const validationError = isTransactionInvalid(nextHoldingTransactions);
+    if (validationError) {
+      setTransactionError(validationError);
       return;
     }
 
-    if (transactionForm.type === "sell" && transactionForm.quantity > selectedHolding.quantity) {
-      setTransactionError("매도 수량이 보유 수량보다 많습니다.");
-      return;
-    }
+    const recalculatedHolding = recalculateHoldingFromTransactions(selectedHolding, nextHoldingTransactions);
 
-    const transaction = buildTransactionRecord(selectedHolding, transactionForm);
-    const nextHolding = applyTransactionToHolding(selectedHolding, transactionForm);
-
-    setEditableHoldings((current) => current.map((holding) => (holding.id === selectedHolding.id ? nextHolding : holding)));
-    setTransactionLog((current) => [transaction, ...current]);
+    setEditableHoldings((current) => current.map((holding) => holding.id === selectedHolding.id ? { ...recalculatedHolding, memo: holding.memo, target_weight: holding.target_weight } : holding));
+    setTransactionLog((current) => editingTransactionId
+      ? current.map((transaction) => transaction.id === editingTransactionId ? nextTransaction : transaction)
+      : [nextTransaction, ...current]);
     setTransactionError(null);
-    setTransactionForm((current) => ({
-      ...current,
-      quantity: 1,
-      fee: 0,
-      note: ""
-    }));
+    setEditingTransactionId(null);
+    setTransactionForm(initialTransactionDraft({ ...selectedHolding, ...recalculatedHolding }));
+  }
+
+  function startEditingTransaction(transaction: Transaction) {
+    setEditingTransactionId(transaction.id);
+    setTransactionError(null);
+    setTransactionForm({
+      asset_id: transaction.asset_id,
+      account_name: transaction.account_name,
+      type: transaction.type === "sell" ? "sell" : "buy",
+      quantity: transaction.quantity,
+      price: transaction.price,
+      fee: transaction.fee,
+      date: transaction.date,
+      note: transaction.note
+    });
+  }
+
+  function cancelTransactionEdit() {
+    setEditingTransactionId(null);
+    setTransactionError(null);
+    setTransactionForm(initialTransactionDraft(selectedHolding));
+  }
+
+  function deleteTransaction(transactionId: string) {
+    if (!selectedHolding) return;
+
+    const nextHoldingTransactions = selectedTransactions.filter((transaction) => transaction.id !== transactionId);
+    const validationError = isTransactionInvalid(nextHoldingTransactions);
+    if (validationError) {
+      setTransactionError(validationError);
+      return;
+    }
+
+    const recalculatedHolding = recalculateHoldingFromTransactions(selectedHolding, nextHoldingTransactions);
+
+    setEditableHoldings((current) => current.map((holding) => holding.id === selectedHolding.id ? { ...recalculatedHolding, memo: holding.memo, target_weight: holding.target_weight } : holding));
+    setTransactionLog((current) => current.filter((transaction) => transaction.id !== transactionId));
+
+    if (editingTransactionId === transactionId) {
+      cancelTransactionEdit();
+    }
   }
 
   function submitNewAsset() {
@@ -241,15 +368,15 @@ function App() {
       ticker: assetForm.ticker,
       market: assetForm.market as HoldingRow["market"],
       asset_type: assetForm.market === "KRX" ? "stock" : "etf",
-      currency: "KRW" as const,
+      currency: "KRW",
       benchmark_group: "custom",
-      dividend_cycle: "none" as const,
+      dividend_cycle: "none",
       is_active: true,
       created_at: timestamp,
       updated_at: timestamp
     };
 
-    const nextHolding = {
+    const nextHolding: Holding = {
       id: holdingId,
       asset_id: assetId,
       account_name: assetForm.account_name,
@@ -262,12 +389,12 @@ function App() {
       updated_at: timestamp
     };
 
-    const nextSnapshot = {
+    const nextSnapshot: PriceSnapshot = {
       assetId,
       currentPrice,
       high52w,
       asOf: timestamp.slice(0, 10),
-      source: "manual" as const
+      source: "manual"
     };
 
     const seedTransaction = buildTransactionRecord(nextHolding, {
@@ -290,6 +417,20 @@ function App() {
     setAssetFormError(null);
   }
 
+  function deleteSelectedAsset() {
+    if (!selectedHolding || !selectedAsset) return;
+
+    const shouldDelete = window.confirm(`${selectedAsset.name}을(를) 삭제하면 보유 정보와 거래 히스토리도 함께 삭제됩니다.`);
+    if (!shouldDelete) return;
+
+    setEditableAssets((current) => current.filter((asset) => asset.id !== selectedAsset.id));
+    setEditableHoldings((current) => current.filter((holding) => holding.id !== selectedHolding.id));
+    setPriceSnapshots((current) => current.filter((snapshot) => snapshot.assetId !== selectedAsset.id));
+    setTransactionLog((current) => current.filter((transaction) => !(transaction.asset_id === selectedHolding.asset_id && transaction.account_name === selectedHolding.account_name)));
+    setEditingTransactionId(null);
+    setTransactionError(null);
+  }
+
   return (
     <div className="app-shell">
       <header className="hero">
@@ -306,14 +447,8 @@ function App() {
           <span className="hero-chip">벤치마크: {benchmarkSettings.ticker}</span>
           <strong>{benchmarkSettings.label}</strong>
           <div className="hero-meta">
-            <div>
-              <span>업데이트 시각</span>
-              <strong>{portfolioSummary.lastUpdated ? formatDateTime(portfolioSummary.lastUpdated) : "-"}</strong>
-            </div>
-            <div>
-              <span>현재 탑 비중</span>
-              <strong>{topWeightRows[0] ? `${topWeightRows[0].name} ${formatPercentPlain(topWeightRows[0].currentWeight)}` : "-"}</strong>
-            </div>
+            <div><span>업데이트 시각</span><strong>{portfolioSummary.lastUpdated ? formatDateTime(portfolioSummary.lastUpdated) : "-"}</strong></div>
+            <div><span>현재 탑 비중</span><strong>{topWeightRows[0] ? `${topWeightRows[0].name} ${formatPercentPlain(topWeightRows[0].currentWeight)}` : "-"}</strong></div>
           </div>
         </div>
       </header>
@@ -399,42 +534,74 @@ function App() {
                   </div>
                   <button className="primary-btn transaction-btn" onClick={submitNewAsset}>종목 추가</button>
                 </section>
-                {selectedHolding && selectedRow ? (
-                  <><div className="editor-summary"><strong>{selectedRow.name}</strong><p>{selectedRow.ticker} · {selectedHolding.account_name}</p><span className={`badge ${selectedRow.mddStage}`}>{getMddLabel(selectedRow.mddStage)}</span></div>
-                  <label className="field-block"><span>편집 종목</span><select value={selectedHolding.id} onChange={(event) => setSelectedHoldingId(event.target.value)}>{editableHoldings.map((holding) => { const asset = editableAssets.find((item) => item.id === holding.asset_id); return <option key={holding.id} value={holding.id}>{asset?.name ?? holding.id}</option>; })}</select></label>
-                  <div className="field-grid"><label className="field-block"><span>보유 수량</span><input type="number" value={selectedHolding.quantity} onChange={(event) => updateHoldingField(selectedHolding.id, "quantity", event.target.value)} /></label><label className="field-block"><span>매입 단가</span><input type="number" value={selectedHolding.avg_buy_price} onChange={(event) => updateHoldingField(selectedHolding.id, "avg_buy_price", event.target.value)} /></label></div>
-                  <label className="field-block"><span>목표 비중 (%)</span><input type="number" step="0.1" value={(selectedHolding.target_weight * 100).toFixed(1)} onChange={(event) => updateHoldingField(selectedHolding.id, "target_weight", event.target.value)} /></label>
-                  <label className="field-block"><span>메모</span><textarea rows={4} value={selectedHolding.memo} onChange={(event) => updateHoldingField(selectedHolding.id, "memo", event.target.value)} /></label>
-                  <section className="transaction-panel">
-                    <div className="panel-head"><h3>거래 입력</h3><span className="helper-text">매수/매도 시 평균단가 자동 계산</span></div>
-                    {transactionError ? <p className="error-text">{transactionError}</p> : null}
-                    <div className="field-grid">
-                      <label className="field-block"><span>거래 유형</span><select value={transactionForm.type} onChange={(event) => setTransactionForm((current) => ({ ...current, type: event.target.value as TransactionDraft["type"] }))}><option value="buy">매수</option><option value="sell">매도</option></select></label>
-                      <label className="field-block"><span>수량</span><input type="number" min="1" value={transactionForm.quantity} onChange={(event) => setTransactionForm((current) => ({ ...current, quantity: Number(event.target.value) }))} /></label>
-                    </div>
-                    <div className="field-grid">
-                      <label className="field-block"><span>가격</span><input type="number" min="0" value={transactionForm.price} onChange={(event) => setTransactionForm((current) => ({ ...current, price: Number(event.target.value) }))} /></label>
-                      <label className="field-block"><span>수수료</span><input type="number" min="0" value={transactionForm.fee} onChange={(event) => setTransactionForm((current) => ({ ...current, fee: Number(event.target.value) }))} /></label>
-                    </div>
-                    <div className="field-grid">
-                      <label className="field-block"><span>거래일</span><input type="date" value={transactionForm.date} onChange={(event) => setTransactionForm((current) => ({ ...current, date: event.target.value }))} /></label>
-                      <label className="field-block"><span>메모</span><input type="text" value={transactionForm.note} onChange={(event) => setTransactionForm((current) => ({ ...current, note: event.target.value }))} /></label>
-                    </div>
-                    <button className="primary-btn transaction-btn" onClick={submitTransaction}>거래 추가</button>
-                    {selectedHolding ? <div className="mini-empty">거래 후 평균단가는 선택한 종목의 보유수량과 매입단가에 자동 반영됩니다.</div> : null}
-                  </section>
-                  <div className="transaction-history">
-                    {transactionLog.slice(0, 5).map((transaction) => (
-                      <div key={transaction.id} className="transaction-row">
-                        <div>
-                          <strong>{transaction.type === "buy" ? "매수" : "매도"}</strong>
-                          <p>{transaction.date} · {transaction.quantity}주 · {transaction.account_name}</p>
-                        </div>
-                        <strong>{formatCurrency(transaction.price)}</strong>
+                {selectedHolding && selectedRow && selectedAsset ? (
+                  <>
+                    <div className="editor-summary"><strong>{selectedRow.name}</strong><p>{selectedRow.ticker} · {selectedHolding.account_name}</p><span className={`badge ${selectedRow.mddStage}`}>{getMddLabel(selectedRow.mddStage)}</span></div>
+                    <label className="field-block"><span>편집 종목</span><select value={selectedHolding.id} onChange={(event) => setSelectedHoldingId(event.target.value)}>{editableHoldings.map((holding) => { const asset = editableAssets.find((item) => item.id === holding.asset_id); return <option key={holding.id} value={holding.id}>{asset?.name ?? holding.id}</option>; })}</select></label>
+
+                    <section className="transaction-panel compact-panel-section">
+                      <div className="panel-head"><h3>종목 정보 편집</h3><span className="helper-text">즉시 저장</span></div>
+                      <div className="field-grid">
+                        <label className="field-block"><span>종목명</span><input type="text" value={selectedAsset.name} onChange={(event) => updateAssetField(selectedAsset.id, "name", event.target.value)} /></label>
+                        <label className="field-block"><span>티커</span><input type="text" value={selectedAsset.ticker} onChange={(event) => updateAssetField(selectedAsset.id, "ticker", event.target.value)} /></label>
                       </div>
-                    ))}
-                  </div>
-                  <div className="editor-metrics"><div><span>평가금액</span><strong>{formatCurrency(selectedRow.marketValue)}</strong></div><div><span>손익</span><strong className={selectedRow.profitLoss >= 0 ? "positive" : "negative"}>{formatCurrency(selectedRow.profitLoss)}</strong></div><div><span>비중 차이</span><strong className={Math.abs(selectedRow.weightDiff) >= 0.03 ? "warning" : ""}>{formatPercent(selectedRow.weightDiff)}</strong></div></div></>
+                      <div className="field-grid">
+                        <label className="field-block"><span>시장</span><select value={selectedAsset.market} onChange={(event) => updateAssetField(selectedAsset.id, "market", event.target.value)}><option value="ETF">ETF</option><option value="KRX">KRX</option><option value="NASDAQ">NASDAQ</option><option value="NYSE">NYSE</option></select></label>
+                        <label className="field-block"><span>계좌</span><input type="text" value={selectedHolding.account_name} onChange={(event) => updateHoldingField(selectedHolding.id, "account_name", event.target.value)} /></label>
+                      </div>
+                      <div className="field-grid">
+                        <label className="field-block"><span>현재가</span><input type="number" min="0" value={selectedSnapshot?.currentPrice ?? 0} onChange={(event) => updateSnapshotField(selectedAsset.id, "currentPrice", event.target.value)} /></label>
+                        <label className="field-block"><span>52주 고가</span><input type="number" min="0" value={selectedSnapshot?.high52w ?? 0} onChange={(event) => updateSnapshotField(selectedAsset.id, "high52w", event.target.value)} /></label>
+                      </div>
+                      <div className="action-row"><button className="ghost-btn danger-btn" onClick={deleteSelectedAsset}>종목 삭제</button></div>
+                    </section>
+
+                    <section className="transaction-panel compact-panel-section">
+                      <div className="panel-head"><h3>보유 정보 편집</h3><span className="helper-text">수동 보정 가능</span></div>
+                      <div className="field-grid">
+                        <label className="field-block"><span>보유 수량</span><input type="number" value={selectedHolding.quantity} onChange={(event) => updateHoldingField(selectedHolding.id, "quantity", event.target.value)} /></label>
+                        <label className="field-block"><span>매입 단가</span><input type="number" value={selectedHolding.avg_buy_price} onChange={(event) => updateHoldingField(selectedHolding.id, "avg_buy_price", event.target.value)} /></label>
+                      </div>
+                      <label className="field-block"><span>목표 비중 (%)</span><input type="number" step="0.1" value={(selectedHolding.target_weight * 100).toFixed(1)} onChange={(event) => updateHoldingField(selectedHolding.id, "target_weight", event.target.value)} /></label>
+                      <label className="field-block"><span>메모</span><textarea rows={4} value={selectedHolding.memo} onChange={(event) => updateHoldingField(selectedHolding.id, "memo", event.target.value)} /></label>
+                    </section>
+
+                    <section className="transaction-panel">
+                      <div className="panel-head"><h3>{editingTransactionId ? "거래 수정" : "거래 입력"}</h3><span className="helper-text">매수/매도 내역 기준으로 평균단가 재계산</span></div>
+                      {transactionError ? <p className="error-text">{transactionError}</p> : null}
+                      <div className="field-grid">
+                        <label className="field-block"><span>거래 유형</span><select value={transactionForm.type} onChange={(event) => setTransactionForm((current) => ({ ...current, type: event.target.value as TransactionDraft["type"] }))}><option value="buy">매수</option><option value="sell">매도</option></select></label>
+                        <label className="field-block"><span>수량</span><input type="number" min="1" value={transactionForm.quantity} onChange={(event) => setTransactionForm((current) => ({ ...current, quantity: Number(event.target.value) }))} /></label>
+                      </div>
+                      <div className="field-grid">
+                        <label className="field-block"><span>가격</span><input type="number" min="0" value={transactionForm.price} onChange={(event) => setTransactionForm((current) => ({ ...current, price: Number(event.target.value) }))} /></label>
+                        <label className="field-block"><span>수수료</span><input type="number" min="0" value={transactionForm.fee} onChange={(event) => setTransactionForm((current) => ({ ...current, fee: Number(event.target.value) }))} /></label>
+                      </div>
+                      <div className="field-grid">
+                        <label className="field-block"><span>거래일</span><input type="date" value={transactionForm.date} onChange={(event) => setTransactionForm((current) => ({ ...current, date: event.target.value }))} /></label>
+                        <label className="field-block"><span>메모</span><input type="text" value={transactionForm.note} onChange={(event) => setTransactionForm((current) => ({ ...current, note: event.target.value }))} /></label>
+                      </div>
+                      <div className="action-row split-actions">
+                        <button className="primary-btn transaction-btn" onClick={submitTransaction}>{editingTransactionId ? "거래 저장" : "거래 추가"}</button>
+                        {editingTransactionId ? <button className="ghost-btn transaction-btn" onClick={cancelTransactionEdit}>편집 취소</button> : null}
+                      </div>
+                      <div className="mini-empty">거래 히스토리를 수정하거나 삭제하면 보유수량과 평균단가가 자동으로 다시 계산됩니다.</div>
+                    </section>
+
+                    <section className="transaction-history-section">
+                      <div className="panel-head compact-head"><h3>거래 히스토리</h3><span className="helper-text">선택 종목 기준 {selectedTransactions.length}건</span></div>
+                      <div className="transaction-history">
+                        {selectedTransactions.length === 0 ? <div className="mini-empty">아직 거래 내역이 없습니다.</div> : selectedTransactions.map((transaction) => (
+                          <div key={transaction.id} className="transaction-row">
+                            <div className="transaction-copy"><strong>{transaction.type === "buy" ? "매수" : "매도"}</strong><p>{transaction.date} · {transaction.quantity}주 · {transaction.account_name}</p>{transaction.note ? <span>{transaction.note}</span> : null}</div>
+                            <div className="transaction-actions"><strong>{formatCurrency(transaction.price)}</strong><div className="action-row tight-actions"><button className="ghost-btn small-btn" onClick={() => startEditingTransaction(transaction)}>편집</button><button className="ghost-btn small-btn danger-btn" onClick={() => deleteTransaction(transaction.id)}>삭제</button></div></div>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+
+                    <div className="editor-metrics"><div><span>평가금액</span><strong>{formatCurrency(selectedRow.marketValue)}</strong></div><div><span>손익</span><strong className={selectedRow.profitLoss >= 0 ? "positive" : "negative"}>{formatCurrency(selectedRow.profitLoss)}</strong></div><div><span>비중 차이</span><strong className={Math.abs(selectedRow.weightDiff) >= 0.03 ? "warning" : ""}>{formatPercent(selectedRow.weightDiff)}</strong></div></div>
+                  </>
                 ) : <div className="mini-empty">편집할 종목을 선택해주세요.</div>}
               </aside>
             </section>
@@ -443,7 +610,6 @@ function App() {
           {activeTab === "performance" ? (
             <section className="page-grid"><section className="panel"><div className="panel-head"><h2>호날두 평가</h2><span className="helper-text">{benchmarkSettings.label} 기준</span></div><div className="chart-wrap"><ResponsiveContainer width="100%" height={280}><AreaChart data={performanceChart}><defs><linearGradient id="portfolioArea" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#1d9b7e" stopOpacity={0.35} /><stop offset="95%" stopColor="#1d9b7e" stopOpacity={0.05} /></linearGradient><linearGradient id="benchmarkArea" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#f39c12" stopOpacity={0.3} /><stop offset="95%" stopColor="#f39c12" stopOpacity={0.04} /></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="year" /><YAxis /><Tooltip /><Area type="monotone" dataKey="portfolio" stroke="#1d9b7e" fill="url(#portfolioArea)" /><Area type="monotone" dataKey="benchmark" stroke="#f39c12" fill="url(#benchmarkArea)" /></AreaChart></ResponsiveContainer></div><div className="table-wrap"><table><thead><tr><th>연도</th><th>전략 수익률</th><th>벤치마크</th><th>Gap</th><th>판정</th><th>메모</th></tr></thead><tbody>{performance.map((row) => <tr key={row.id}><td>{row.year}</td><td className={row.portfolio_return >= 0 ? "positive" : "negative"}>{formatPercentPlain(row.portfolio_return)}</td><td className={row.benchmark_return >= 0 ? "positive" : "negative"}>{formatPercentPlain(row.benchmark_return)}</td><td className={row.gap >= 0 ? "positive" : "negative"}>{formatPercent(row.gap)}</td><td>{row.red_flag ? <span className="badge trigger_30">레드카드</span> : row.yellow_flag ? <span className="badge trigger_15">옐로카드</span> : <span className="badge normal">정상</span>}</td><td>{row.note}</td></tr>)}</tbody></table></div></section></section>
           ) : null}
-
           {activeTab === "dividends" ? (
             <section className="page-grid"><div className="summary-grid three-up"><SummaryCard title="예상 누적 배당" value={formatCurrency(dividendSummary.totalExpected)} /><SummaryCard title="지급 완료 배당" value={formatCurrency(dividendSummary.totalPaid)} /><SummaryCard title="이번 달 예정" value={formatCurrency(dividendSummary.planned[0]?.expected_amount ?? 0)} /></div><section className="panel"><div className="panel-head"><h2>예정 / 확정 / 지급 완료</h2></div><div className="dividend-grid"><DividendColumn title="예정 배당" items={dividendSummary.planned} /><DividendColumn title="확정 배당" items={dividendSummary.confirmed} /><DividendColumn title="지급 완료" items={dividendSummary.paid} /></div></section></section>
           ) : null}
@@ -470,22 +636,3 @@ function DividendColumn({ title, items }: { title: string; items: DividendEvent[
 }
 
 export default App;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

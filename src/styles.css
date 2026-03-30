@@ -206,3 +206,73 @@ tbody tr { cursor: pointer; }
 .new-asset-panel .field-grid {
   margin-bottom: 0;
 }
+
+.compact-panel-section {
+  margin-top: 0;
+}
+
+.action-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.split-actions {
+  margin-top: 4px;
+}
+
+.tight-actions {
+  justify-content: flex-end;
+}
+
+.danger-btn {
+  border-color: rgba(198, 74, 63, 0.22);
+  color: #b33a30;
+}
+
+.small-btn {
+  padding: 7px 11px;
+  font-size: 0.85rem;
+}
+
+.compact-head {
+  margin-bottom: 10px;
+}
+
+.transaction-history-section {
+  margin-top: 18px;
+}
+
+.transaction-copy {
+  min-width: 0;
+}
+
+.transaction-copy p,
+.transaction-copy span {
+  display: block;
+}
+
+.transaction-actions {
+  display: grid;
+  gap: 10px;
+  justify-items: end;
+  text-align: right;
+}
+
+@media (max-width: 760px) {
+  .transaction-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .transaction-actions {
+    width: 100%;
+    justify-items: stretch;
+    text-align: left;
+  }
+
+  .tight-actions {
+    justify-content: flex-start;
+  }
+}

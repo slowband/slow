@@ -28,40 +28,12 @@ export const buildSeedTransactions = (holdings: Holding[]): Transaction[] =>
     created_at: holding.created_at
   }));
 
-export const applyTransactionToHolding = (
-  holding: Holding,
-  draft: TransactionDraft
-): Holding => {
-  const currentCost = holding.quantity * holding.avg_buy_price;
-
-  if (draft.type === "buy") {
-    const nextQuantity = holding.quantity + draft.quantity;
-    const nextCost = currentCost + draft.quantity * draft.price + draft.fee;
-
-    return {
-      ...holding,
-      quantity: nextQuantity,
-      avg_buy_price: nextQuantity > 0 ? nextCost / nextQuantity : 0,
-      buy_date: draft.date,
-      updated_at: new Date().toISOString()
-    };
-  }
-
-  const nextQuantity = Math.max(holding.quantity - draft.quantity, 0);
-
-  return {
-    ...holding,
-    quantity: nextQuantity,
-    avg_buy_price: nextQuantity > 0 ? holding.avg_buy_price : 0,
-    updated_at: new Date().toISOString()
-  };
-};
-
 export const buildTransactionRecord = (
   holding: Holding,
-  draft: TransactionDraft
+  draft: TransactionDraft,
+  existingId?: string
 ): Transaction => ({
-  id: `tx-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  id: existingId ?? `tx-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   asset_id: holding.asset_id,
   account_name: holding.account_name,
   date: draft.date,
@@ -71,5 +43,39 @@ export const buildTransactionRecord = (
   amount: draft.quantity * draft.price,
   fee: draft.fee,
   note: draft.note,
-  created_at: new Date().toISOString()
+  created_at: existingId ? holding.updated_at : new Date().toISOString()
 });
+
+export const recalculateHoldingFromTransactions = (
+  holding: Holding,
+  transactions: Transaction[]
+): Holding => {
+  const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
+  let quantity = 0;
+  let totalCost = 0;
+
+  for (const tx of sorted) {
+    if (tx.type === "buy") {
+      quantity += tx.quantity;
+      totalCost += tx.quantity * tx.price + tx.fee;
+      continue;
+    }
+
+    if (tx.type === "sell") {
+      const avg = quantity > 0 ? totalCost / quantity : 0;
+      const sellQty = Math.min(tx.quantity, quantity);
+      quantity -= sellQty;
+      totalCost = quantity > 0 ? avg * quantity : 0;
+    }
+  }
+
+  const firstBuy = sorted.find((tx) => tx.type === "buy");
+
+  return {
+    ...holding,
+    quantity,
+    avg_buy_price: quantity > 0 ? totalCost / quantity : 0,
+    buy_date: firstBuy?.date ?? holding.buy_date,
+    updated_at: new Date().toISOString()
+  };
+};
