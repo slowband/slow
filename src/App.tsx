@@ -62,6 +62,7 @@ import type {
 
 type TabKey = "home" | "portfolio" | "performance" | "dividends";
 type SortKey = "returnRate" | "weightDiff" | "drawdownFrom52w";
+type PortfolioViewMode = "summary" | "expanded";
 type HoldingEditField = "account_name" | "quantity" | "avg_buy_price" | "target_weight" | "memo";
 type AssetEditField = "name" | "ticker" | "market";
 type SnapshotEditField = "currentPrice" | "high52w";
@@ -95,7 +96,7 @@ const initialAssetForm: Record<AssetFormField, string> = {
   name: "",
   ticker: "",
   market: "ETF",
-  account_name: "ISA",
+  account_name: "절세계좌",
   quantity: "1",
   avg_buy_price: "0",
   target_weight: "10",
@@ -140,6 +141,7 @@ const isTransactionInvalid = (transactions: Transaction[]) => {
 function App() {
   const [activeTab, setActiveTab] = useState<TabKey>("home");
   const [sortKey, setSortKey] = useState<SortKey>("drawdownFrom52w");
+  const [portfolioViewMode, setPortfolioViewMode] = useState<PortfolioViewMode>("summary");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -153,6 +155,7 @@ function App() {
   const [transactionError, setTransactionError] = useState<string | null>(null);
   const [assetForm, setAssetForm] = useState(initialAssetForm);
   const [assetFormError, setAssetFormError] = useState<string | null>(null);
+  const [showAssetForm, setShowAssetForm] = useState(false);
 
   useEffect(() => {
     void refreshPrices(true);
@@ -503,40 +506,33 @@ function App() {
             <section className="portfolio-layout">
               <section className="panel portfolio-main">
                 <div className="panel-head"><h2>포트폴리오 / MDD 모니터</h2><div className="sort-group">{Object.entries(sortLabels).map(([key, label]) => <button key={key} className={sortKey === key ? "ghost-btn is-active" : "ghost-btn"} onClick={() => setSortKey(key as SortKey)}>{label} 정렬</button>)}</div></div>
-                <div className="table-wrap desktop-only"><table><thead><tr><th>종목</th><th>계좌</th><th>수량</th><th>매입단가</th><th>현재가</th><th>평가금액</th><th>손익</th><th>수익률</th><th>현재 비중</th><th>목표 비중</th><th>비중 차이</th><th>52주 고가</th><th>하락률</th><th>트리거</th></tr></thead><tbody>{sortedRows.map((row) => <PortfolioRow key={row.holdingId} row={row} isSelected={row.holdingId === selectedHolding?.id} onSelect={() => setSelectedHoldingId(row.holdingId)} />)}</tbody></table></div>
-                <div className="mobile-cards mobile-only">{sortedRows.map((row) => <article key={row.holdingId} className={row.holdingId === selectedHolding?.id ? "asset-card selected" : "asset-card"} onClick={() => setSelectedHoldingId(row.holdingId)}><div className="asset-card-head"><div><strong>{row.name}</strong><p>{row.ticker} · {row.accountName}</p></div><span className={`badge ${row.mddStage}`}>{getMddLabel(row.mddStage)}</span></div><dl className="asset-stats"><div><dt>평가금액</dt><dd>{formatCurrency(row.marketValue)}</dd></div><div><dt>손익</dt><dd className={row.profitLoss >= 0 ? "positive" : "negative"}>{formatCurrency(row.profitLoss)}</dd></div><div><dt>수익률</dt><dd className={row.returnRate >= 0 ? "positive" : "negative"}>{formatPercent(row.returnRate)}</dd></div><div><dt>비중 차이</dt><dd className={Math.abs(row.weightDiff) >= 0.03 ? "warning" : ""}>{formatPercent(row.weightDiff)}</dd></div></dl></article>)}</div>
+                <div className="table-wrap desktop-only"><table><thead><tr><th>종목</th><th>수량</th><th>매입단가</th><th>현재가</th><th>평가금액</th><th>손익</th><th>수익률</th><th>현재 비중</th><th>목표 비중</th><th>비중 차이</th><th>52주 고가</th><th>하락률</th><th>트리거</th></tr></thead><tbody>{sortedRows.map((row) => <PortfolioRow key={row.holdingId} row={row} isSelected={row.holdingId === selectedHolding?.id} onSelect={() => setSelectedHoldingId(row.holdingId)} />)}</tbody></table></div>
+                <div className="mobile-cards mobile-only">{sortedRows.map((row) => <article key={row.holdingId} className={row.holdingId === selectedHolding?.id ? "asset-card selected" : "asset-card"} onClick={() => setSelectedHoldingId(row.holdingId)}><div className="asset-card-head"><div><strong>{row.name}</strong><p>{row.ticker}</p></div><span className={`badge ${row.mddStage}`}>{getMddLabel(row.mddStage)}</span></div><dl className="asset-stats"><div><dt>평가금액</dt><dd>{formatCurrency(row.marketValue)}</dd></div><div><dt>손익</dt><dd className={row.profitLoss >= 0 ? "positive" : "negative"}>{formatCurrency(row.profitLoss)}</dd></div><div><dt>수익률</dt><dd className={row.returnRate >= 0 ? "positive" : "negative"}>{formatPercent(row.returnRate)}</dd></div><div><dt>비중 차이</dt><dd className={Math.abs(row.weightDiff) >= 0.03 ? "warning" : ""}>{formatPercent(row.weightDiff)}</dd></div></dl></article>)}</div>
               </section>
 
-              <aside className="panel editor-panel">
-                <div className="panel-head"><h2>수동 입력 편집</h2><span className="helper-text">로컬 상태 기준</span></div>
+              <section className="panel editor-panel">
+                <div className="panel-head"><h2>수동 입력 편집</h2><span className="helper-text">거래 기준 관리 + 필요시 수동 보정</span></div>
                 <section className="transaction-panel new-asset-panel">
-                  <div className="panel-head"><h3>새 종목 추가</h3><span className="helper-text">CSV 없이 직접 등록</span></div>
-                  {assetFormError ? <p className="error-text">{assetFormError}</p> : null}
-                  <div className="field-grid">
+                  <div className="panel-head"><h3>새 종목 추가</h3><span className="helper-text">자주 쓰지 않는 기능</span></div>
+                  <button className="ghost-btn" onClick={() => setShowAssetForm((current) => !current)}>{showAssetForm ? "입력 닫기" : "새 종목 추가 열기"}</button>
+                  {showAssetForm ? <><div className="editor-note">현재가와 52주 고가는 우선 평균단가 기준으로 생성되고, 추가 후 종목 정보 편집에서 조정할 수 있습니다.</div>{assetFormError ? <p className="error-text">{assetFormError}</p> : null}<div className="field-grid">
                     <label className="field-block"><span>종목명</span><input type="text" value={assetForm.name} onChange={(event) => setAssetForm((current) => ({ ...current, name: event.target.value }))} /></label>
                     <label className="field-block"><span>티커</span><input type="text" value={assetForm.ticker} onChange={(event) => setAssetForm((current) => ({ ...current, ticker: event.target.value }))} /></label>
                   </div>
                   <div className="field-grid">
                     <label className="field-block"><span>시장</span><select value={assetForm.market} onChange={(event) => setAssetForm((current) => ({ ...current, market: event.target.value }))}><option value="ETF">ETF</option><option value="KRX">KRX</option><option value="NASDAQ">NASDAQ</option><option value="NYSE">NYSE</option></select></label>
-                    <label className="field-block"><span>계좌</span><input type="text" value={assetForm.account_name} onChange={(event) => setAssetForm((current) => ({ ...current, account_name: event.target.value }))} /></label>
-                  </div>
-                  <div className="field-grid">
                     <label className="field-block"><span>초기 수량</span><input type="number" min="0" value={assetForm.quantity} onChange={(event) => setAssetForm((current) => ({ ...current, quantity: event.target.value }))} /></label>
+                  </div>
+                  <div className="field-grid">
                     <label className="field-block"><span>평균단가</span><input type="number" min="0" value={assetForm.avg_buy_price} onChange={(event) => setAssetForm((current) => ({ ...current, avg_buy_price: event.target.value }))} /></label>
-                  </div>
-                  <div className="field-grid">
-                    <label className="field-block"><span>현재가</span><input type="number" min="0" value={assetForm.current_price} onChange={(event) => setAssetForm((current) => ({ ...current, current_price: event.target.value }))} /></label>
-                    <label className="field-block"><span>52주 고가</span><input type="number" min="0" value={assetForm.high_52w} onChange={(event) => setAssetForm((current) => ({ ...current, high_52w: event.target.value }))} /></label>
-                  </div>
-                  <div className="field-grid">
                     <label className="field-block"><span>목표 비중 (%)</span><input type="number" min="0" step="0.1" value={assetForm.target_weight} onChange={(event) => setAssetForm((current) => ({ ...current, target_weight: event.target.value }))} /></label>
-                    <label className="field-block"><span>메모</span><input type="text" value={assetForm.memo} onChange={(event) => setAssetForm((current) => ({ ...current, memo: event.target.value }))} /></label>
                   </div>
-                  <button className="primary-btn transaction-btn" onClick={submitNewAsset}>종목 추가</button>
+                  <label className="field-block"><span>메모</span><input type="text" value={assetForm.memo} onChange={(event) => setAssetForm((current) => ({ ...current, memo: event.target.value }))} /></label>
+                  <button className="primary-btn transaction-btn" onClick={submitNewAsset}>종목 추가</button></> : null}
                 </section>
                 {selectedHolding && selectedRow && selectedAsset ? (
                   <>
-                    <div className="editor-summary"><strong>{selectedRow.name}</strong><p>{selectedRow.ticker} · {selectedHolding.account_name}</p><span className={`badge ${selectedRow.mddStage}`}>{getMddLabel(selectedRow.mddStage)}</span></div>
+                    <div className="editor-summary"><strong>{selectedRow.name}</strong><p>{selectedRow.ticker}</p><span className={`badge ${selectedRow.mddStage}`}>{getMddLabel(selectedRow.mddStage)}</span></div>
                     <label className="field-block"><span>편집 종목</span><select value={selectedHolding.id} onChange={(event) => setSelectedHoldingId(event.target.value)}>{editableHoldings.map((holding) => { const asset = editableAssets.find((item) => item.id === holding.asset_id); return <option key={holding.id} value={holding.id}>{asset?.name ?? holding.id}</option>; })}</select></label>
 
                     <section className="transaction-panel compact-panel-section">
@@ -547,7 +543,6 @@ function App() {
                       </div>
                       <div className="field-grid">
                         <label className="field-block"><span>시장</span><select value={selectedAsset.market} onChange={(event) => updateAssetField(selectedAsset.id, "market", event.target.value)}><option value="ETF">ETF</option><option value="KRX">KRX</option><option value="NASDAQ">NASDAQ</option><option value="NYSE">NYSE</option></select></label>
-                        <label className="field-block"><span>계좌</span><input type="text" value={selectedHolding.account_name} onChange={(event) => updateHoldingField(selectedHolding.id, "account_name", event.target.value)} /></label>
                       </div>
                       <div className="field-grid">
                         <label className="field-block"><span>현재가</span><input type="number" min="0" value={selectedSnapshot?.currentPrice ?? 0} onChange={(event) => updateSnapshotField(selectedAsset.id, "currentPrice", event.target.value)} /></label>
@@ -557,12 +552,12 @@ function App() {
                     </section>
 
                     <section className="transaction-panel compact-panel-section">
-                      <div className="panel-head"><h3>보유 정보 편집</h3><span className="helper-text">수동 보정 가능</span></div>
+                      <div className="panel-head"><h3>보유 정보 보정</h3><span className="helper-text">기본은 아래 거래 히스토리 기준 관리</span></div>
                       <div className="field-grid">
                         <label className="field-block"><span>보유 수량</span><input type="number" value={selectedHolding.quantity} onChange={(event) => updateHoldingField(selectedHolding.id, "quantity", event.target.value)} /></label>
                         <label className="field-block"><span>매입 단가</span><input type="number" value={selectedHolding.avg_buy_price} onChange={(event) => updateHoldingField(selectedHolding.id, "avg_buy_price", event.target.value)} /></label>
                       </div>
-                      <label className="field-block"><span>목표 비중 (%)</span><input type="number" step="0.1" value={(selectedHolding.target_weight * 100).toFixed(1)} onChange={(event) => updateHoldingField(selectedHolding.id, "target_weight", event.target.value)} /></label>
+                      <div className="editor-note">권장 흐름은 거래 히스토리 입력입니다. 이 구역은 초기값 보정이나 예외 상황 정리에만 사용하세요.</div><label className="field-block"><span>목표 비중 (%)</span><input type="number" step="0.1" value={(selectedHolding.target_weight * 100).toFixed(1)} onChange={(event) => updateHoldingField(selectedHolding.id, "target_weight", event.target.value)} /></label>
                       <label className="field-block"><span>메모</span><textarea rows={4} value={selectedHolding.memo} onChange={(event) => updateHoldingField(selectedHolding.id, "memo", event.target.value)} /></label>
                     </section>
 
@@ -603,7 +598,7 @@ function App() {
                     <div className="editor-metrics"><div><span>평가금액</span><strong>{formatCurrency(selectedRow.marketValue)}</strong></div><div><span>손익</span><strong className={selectedRow.profitLoss >= 0 ? "positive" : "negative"}>{formatCurrency(selectedRow.profitLoss)}</strong></div><div><span>비중 차이</span><strong className={Math.abs(selectedRow.weightDiff) >= 0.03 ? "warning" : ""}>{formatPercent(selectedRow.weightDiff)}</strong></div></div>
                   </>
                 ) : <div className="mini-empty">편집할 종목을 선택해주세요.</div>}
-              </aside>
+              </section>
             </section>
           ) : null}
 
@@ -628,7 +623,7 @@ function AlertItem({ label, value, tone }: { label: string; value: string; tone:
 }
 
 function PortfolioRow({ row, isSelected, onSelect }: { row: HoldingRow; isSelected: boolean; onSelect: () => void; }) {
-  return <tr className={isSelected ? "table-row-selected" : undefined} onClick={onSelect}><td><strong>{row.name}</strong><div className="subtle">{row.ticker} · {row.market}</div></td><td>{row.accountName}</td><td>{formatNumber(row.quantity)}</td><td>{formatCurrency(row.avgBuyPrice)}</td><td>{formatCurrency(row.currentPrice)}</td><td>{formatCurrency(row.marketValue)}</td><td className={row.profitLoss >= 0 ? "positive" : "negative"}>{formatCurrency(row.profitLoss)}</td><td className={row.returnRate >= 0 ? "positive" : "negative"}>{formatPercent(row.returnRate)}</td><td>{formatPercentPlain(row.currentWeight)}</td><td>{formatPercentPlain(row.targetWeight)}</td><td className={Math.abs(row.weightDiff) >= 0.03 ? "warning" : ""}>{formatPercent(row.weightDiff)}</td><td>{formatCurrency(row.high52w)}</td><td className={row.drawdownFrom52w >= -0.15 ? "" : "negative"}>{formatPercent(row.drawdownFrom52w)}</td><td><span className={`badge ${row.mddStage}`}>{getMddLabel(row.mddStage)}</span></td></tr>;
+  return <tr className={isSelected ? "table-row-selected" : undefined} onClick={onSelect}><td><strong>{row.name}</strong><div className="subtle">{row.ticker} · {row.market}</div></td><td>{formatNumber(row.quantity)}</td><td>{formatCurrency(row.avgBuyPrice)}</td><td>{formatCurrency(row.currentPrice)}</td><td>{formatCurrency(row.marketValue)}</td><td className={row.profitLoss >= 0 ? "positive" : "negative"}>{formatCurrency(row.profitLoss)}</td><td className={row.returnRate >= 0 ? "positive" : "negative"}>{formatPercent(row.returnRate)}</td><td>{formatPercentPlain(row.currentWeight)}</td><td>{formatPercentPlain(row.targetWeight)}</td><td className={Math.abs(row.weightDiff) >= 0.03 ? "warning" : ""}>{formatPercent(row.weightDiff)}</td><td>{formatCurrency(row.high52w)}</td><td className={row.drawdownFrom52w >= -0.15 ? "" : "negative"}>{formatPercent(row.drawdownFrom52w)}</td><td><span className={`badge ${row.mddStage}`}>{getMddLabel(row.mddStage)}</span></td></tr>;
 }
 
 function DividendColumn({ title, items }: { title: string; items: DividendEvent[]; }) {
@@ -636,3 +631,19 @@ function DividendColumn({ title, items }: { title: string; items: DividendEvent[
 }
 
 export default App;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

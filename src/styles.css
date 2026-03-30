@@ -86,7 +86,7 @@ th { color: #6b7680; font-size: 0.88rem; font-weight: 700; }
 tbody tr { cursor: pointer; }
 .table-row-selected { background: rgba(255, 243, 216, 0.5); }
 .portfolio-layout { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(300px, 0.9fr); gap: 20px; align-items: start; }
-.editor-panel { position: sticky; top: 24px; }
+.editor-panel { position: static; }
 .editor-summary { display: grid; gap: 4px; margin-bottom: 16px; }
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .field-block { display: grid; gap: 8px; margin-bottom: 14px; }
@@ -275,4 +275,65 @@ tbody tr { cursor: pointer; }
   .tight-actions {
     justify-content: flex-start;
   }
+}
+
+.app-shell {
+  max-width: 1480px;
+}
+
+.portfolio-layout {
+  grid-template-columns: minmax(0, 1.95fr) minmax(320px, 0.85fr);
+}
+
+.portfolio-main {
+  padding: 18px;
+}
+
+.portfolio-main table {
+  min-width: 1320px;
+}
+
+.portfolio-main th,
+.portfolio-main td {
+  padding: 10px 8px;
+  font-size: 0.92rem;
+}
+
+.portfolio-main td:first-child,
+.portfolio-main th:first-child {
+  min-width: 200px;
+}
+
+.portfolio-main .subtle {
+  font-size: 0.82rem;
+}
+
+.portfolio-head {
+  align-items: flex-start;
+}
+
+.portfolio-toolbar {
+  display: grid;
+  gap: 10px;
+  justify-items: end;
+}
+
+.editor-note {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(23, 32, 38, 0.05);
+  color: #51606b;
+  font-size: 0.88rem;
+}
+
+@media (max-width: 760px) {
+  .portfolio-toolbar {
+    width: 100%;
+    justify-items: stretch;
+  }
+}
+
+.new-asset-panel > .ghost-btn {
+  margin-bottom: 12px;
 }
